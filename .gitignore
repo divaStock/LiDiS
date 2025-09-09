@@ -1,0 +1,253 @@
+# LiDiS Linux Distribution - Git Ignore File
+
+# Build directories
+/build/
+/tmp/
+*-build/
+*-output/
+/output/
+
+# Compiled kernel and modules
+*.o
+*.ko
+*.mod.c
+*.cmd
+*.symvers
+*.order
+modules.builtin
+Module.symvers
+*.tmp_versions/
+vmlinux*
+bzImage
+zImage
+System.map
+.config.old
+.version
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.pyc
+*.pyo
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+/var/log/
+audit.log
+syslog
+kern.log
+
+# ISO images and archives
+*.iso
+*.img
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.zip
+*.deb
+*.rpm
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+.tmp/
+
+# Security files (don't commit keys/certificates)
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+private_key*
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+threat_intel.db
+lidis_threat_intel.db
+
+# Configuration files with secrets
+config.secret
+*.secret
+.env.local
+.env.production
+
+# Docker files
+Dockerfile.lidis
+
+# Kernel build artifacts
+scripts/basic/fixdep
+scripts/kconfig/conf
+scripts/kconfig/mconf
+scripts/mod/modpost
+scripts/recordmcount
+scripts/sortextable
+usr/gen_init_cpio
+usr/initramfs_data.cpio
+arch/*/boot/compressed/vmlinux
+arch/*/boot/compressed/vmlinux.bin
+arch/*/boot/compressed/vmlinux.lds
+
+# Root filesystem artifacts
+rootfs/
+initramfs/
+squashfs/
+filesystem.squashfs
+
+# Package build artifacts
+packages/
+*.deb
+*.rpm
+*.pkg.tar.xz
+
+# Test results
+test-results/
+coverage/
+.coverage
+htmlcov/
+
+# Documentation build
+docs/_build/
+site/
+
+# Cache directories
+.cache/
+__pycache__/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+*~
+*.orig
+
+# Patch files
+*.patch
+*.diff
+*.rej
+
+# Large binary files (keep source, ignore compiled)
+*.a
+*.lib
+*.exe
+*.dll
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Autotools
+.deps/
+.libs/
+*.la
+*.lo
+Makefile.in
+configure
+config.h
+config.h.in
+config.log
+config.status
+stamp-h1
+autom4te.cache/
+
+# Node.js (if used for any web components)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Rust (if used for any components)
+target/
+Cargo.lock
+
+# Go (if used for any components)
+vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Local development
+local/
+dev/
+sandbox/
+
+# Performance profiling
+*.prof
+perf.data*
+callgrind.out.*
+
+# Core dumps
+core
+core.*
+*.core
+
+# Fuzzing artifacts
+crashes/
+hangs/
+queue/
+.cur_input
+
+# Security scan results
+scan-results/
+*.sarif
+
+# Build reports
+*-build-report.txt
+*-build-report.html
