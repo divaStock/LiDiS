@@ -17,6 +17,7 @@ set -euo pipefail
 : "${KERNEL_VERSION:=6.8}"
 : "${ARCH:=}"
 : "${JOBS:=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+: "${ENABLE_BTF:=false}"
 
 # Colors for output  
 RED='\033[0;31m'
@@ -121,6 +122,11 @@ check_dependencies() {
         "bc" "kmod" "cpio" "rsync"
     )
     
+    # Optional dependencies (build will work without these)
+    local optional_deps=(
+        "pahole"
+    )
+    
     # Architecture-specific dependencies
     case "$ARCH" in
         "x86_64"|"amd64")
@@ -139,21 +145,42 @@ check_dependencies() {
     esac
     
     local missing_deps=()
+    local missing_optional=()
     
+    # Check required dependencies
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" >/dev/null 2>&1 && ! dpkg -l "$dep" >/dev/null 2>&1; then
             missing_deps+=("$dep")
         fi
     done
     
+    # Check optional dependencies
+    for dep in "${optional_deps[@]}"; do
+        if ! command -v "$dep" >/dev/null 2>&1 && ! dpkg -l "$dep" >/dev/null 2>&1; then
+            missing_optional+=("$dep")
+        fi
+    done
+    
     if [ ${#missing_deps[@]} -ne 0 ]; then
-        log_error "Missing dependencies: ${missing_deps[*]}"
+        log_error "Missing required dependencies: ${missing_deps[*]}"
         log_info "Please install missing dependencies and try again"
         log_info "Example: sudo apt-get install ${missing_deps[*]}"
         exit 1
     fi
     
-    log_success "All dependencies satisfied"
+    if [ ${#missing_optional[@]} -ne 0 ]; then
+        log_warning "Missing optional dependencies: ${missing_optional[*]}"
+        log_info "Build will continue, but some features may be disabled"
+        log_info "To enable all features: sudo apt-get install ${missing_optional[*]}"
+        
+        # Specific guidance for pahole
+        if [[ " ${missing_optional[*]} " =~ " pahole " ]]; then
+            log_info "Without pahole: BTF debug info will be disabled automatically"
+            log_info "Install pahole with: sudo apt-get install dwarves"
+        fi
+    fi
+    
+    log_success "All required dependencies satisfied"
 }
 
 # Setup build environment
@@ -300,15 +327,81 @@ build_kernel() {
     # Use LiDiS kernel configuration
     cp "$CONFIGS_DIR/kernel_config" .config
     
+    # Handle BTF configuration based on user preference and tool availability
+    if [ "$ENABLE_BTF" = "true" ] && command -v pahole >/dev/null 2>&1; then
+        log_info "BTF enabled by user and pahole available - keeping BTF debug info"
+        # Verify pahole version is compatible
+        local pahole_version
+        pahole_version=$(pahole --version 2>/dev/null | head -1 || echo "unknown")
+        log_info "Using pahole version: $pahole_version"
+    else
+        if [ "$ENABLE_BTF" = "true" ] && ! command -v pahole >/dev/null 2>&1; then
+            log_warning "BTF requested but pahole not available - disabling BTF"
+        else
+            log_info "Disabling BTF debug info to ensure reliable builds"
+        fi
+        
+        # Comprehensively disable all BTF-related options (handle macOS vs Linux sed)
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS sed requires empty string after -i
+            sed -i '' 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' .config
+            sed -i '' 's/CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' .config
+            sed -i '' 's/CONFIG_PAHOLE_HAS_SPLIT_BTF=y/# CONFIG_PAHOLE_HAS_SPLIT_BTF is not set/' .config
+        else
+            # Linux sed
+            sed -i 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' .config
+            sed -i 's/CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' .config
+            sed -i 's/CONFIG_PAHOLE_HAS_SPLIT_BTF=y/# CONFIG_PAHOLE_HAS_SPLIT_BTF is not set/' .config
+        fi
+        
+        # Ensure BTF is completely disabled
+        cat >> .config << 'EOF'
+# LiDiS: Disable BTF to prevent build failures
+# CONFIG_DEBUG_INFO_BTF is not set
+# CONFIG_DEBUG_INFO_BTF_MODULES is not set  
+# CONFIG_PAHOLE_HAS_SPLIT_BTF is not set
+EOF
+        
+        log_info "BTF debug info disabled for stable builds"
+    fi
+    
     # Update configuration for current kernel version
     make olddefconfig
     
-    # Build kernel and modules
+    # Build kernel and modules with enhanced error handling
     log_info "Compiling kernel (this may take a while)..."
-    make -j"$JOBS" || error_exit "Kernel build failed"
+    
+    # First attempt: normal build
+    if ! make -j"$JOBS"; then
+        log_warning "Initial kernel build failed, trying fallback options..."
+        
+        # Clean any partial build artifacts that might be corrupted
+        log_info "Cleaning build artifacts..."
+        make clean
+        
+        # Disable more debug options that can cause issues
+        log_info "Disabling additional debug options for fallback build..."
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' 's/CONFIG_DEBUG_INFO=y/# CONFIG_DEBUG_INFO is not set/' .config
+            sed -i '' 's/CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y/# CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT is not set/' .config
+        else
+            sed -i 's/CONFIG_DEBUG_INFO=y/# CONFIG_DEBUG_INFO is not set/' .config
+            sed -i 's/CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y/# CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT is not set/' .config
+        fi
+        
+        # Regenerate config
+        make olddefconfig
+        
+        # Retry build with single thread to avoid race conditions
+        log_info "Retrying kernel build with single thread..."
+        make -j1 || error_exit "Kernel build failed even with fallback options"
+    fi
     
     log_info "Compiling kernel modules..."
-    make -j"$JOBS" modules || error_exit "Module build failed"
+    make -j"$JOBS" modules || {
+        log_warning "Module build failed, retrying with single thread..."
+        make -j1 modules || error_exit "Module build failed"
+    }
     
     # Install modules to temporary location  
     local modules_dir="$BUILD_DIR/rootfs/lib/modules/$KERNEL_VERSION-lidis-security"
@@ -1019,6 +1112,7 @@ case "${1:-build}" in
         echo "  KERNEL_VERSION   Kernel version (default: 6.8)"
         echo "  ARCH             Architecture (auto-detected: $(uname -m))"
         echo "  JOBS             Parallel jobs (default: auto-detected)"
+        echo "  ENABLE_BTF       Enable BTF debug info (default: false)"
         echo "  KEEP_BUILD_DIR   Keep build directory (default: false)"
         echo "  NO_CLEANUP       Skip cleanup (default: false)"
         echo ""
