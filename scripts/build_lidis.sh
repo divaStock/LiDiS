@@ -14,7 +14,7 @@ set -euo pipefail
 : "${LIDIS_CODENAME:=SecurityCore}"  
 : "${BUILD_DIR:=/tmp/lidis-build}"
 : "${OUTPUT_DIR:=/tmp/lidis-output}"
-: "${KERNEL_VERSION:=6.8.0}"
+: "${KERNEL_VERSION:=6.8}"
 : "${ARCH:=}"
 : "${JOBS:=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
@@ -178,15 +178,86 @@ download_kernel() {
     log_info "Downloading Linux kernel $KERNEL_VERSION..."
     
     local kernel_dir="$BUILD_DIR/kernel/linux-$KERNEL_VERSION"
+    local download_urls=(
+        "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VERSION.tar.xz"
+        "https://mirrors.edge.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VERSION.tar.xz" 
+        "https://www.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VERSION.tar.xz"
+        "https://github.com/torvalds/linux/archive/v$KERNEL_VERSION.tar.gz"
+    )
     
     if [ ! -d "$kernel_dir" ]; then
         cd "$BUILD_DIR/kernel"
-        wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VERSION.tar.xz" \
-            -O "linux-$KERNEL_VERSION.tar.xz" || \
-            error_exit "Failed to download kernel"
         
-        tar -xf "linux-$KERNEL_VERSION.tar.xz" || \
-            error_exit "Failed to extract kernel"
+        local downloaded=false
+        local download_cmd=""
+        
+        # Choose download command (prefer curl over wget on macOS)
+        if command -v curl >/dev/null 2>&1; then
+            download_cmd="curl"
+        elif command -v wget >/dev/null 2>&1; then
+            download_cmd="wget"
+        else
+            error_exit "Neither curl nor wget found. Please install one of them."
+        fi
+        
+        # Try each URL until one works
+        for url in "${download_urls[@]}"; do
+            log_info "Trying $url..."
+            
+            # Determine file extension and output filename
+            local filename
+            local extract_cmd
+            if [[ "$url" == *".tar.gz" ]]; then
+                filename="linux-$KERNEL_VERSION.tar.gz"
+                extract_cmd="tar -xzf"
+            else
+                filename="linux-$KERNEL_VERSION.tar.xz"
+                extract_cmd="tar -xf"
+            fi
+            
+            # Try downloading with timeout
+            local download_success=false
+            if [ "$download_cmd" = "curl" ]; then
+                if curl --max-time 300 --connect-timeout 30 -L -f -o "$filename" "$url" 2>/dev/null; then
+                    download_success=true
+                fi
+            else
+                if wget --timeout=300 --connect-timeout=30 -q "$url" -O "$filename"; then
+                    download_success=true
+                fi
+            fi
+            
+            if [ "$download_success" = true ]; then
+                log_info "Download successful, extracting..."
+                if $extract_cmd "$filename" 2>/dev/null; then
+                    # GitHub tarballs extract to linux-$KERNEL_VERSION directory
+                    if [[ "$url" == *"github.com"* ]] && [ -d "linux-$KERNEL_VERSION" ]; then
+                        # GitHub archive is ready
+                        downloaded=true
+                        break
+                    elif [ -d "linux-$KERNEL_VERSION" ]; then
+                        # Standard kernel.org archive is ready
+                        downloaded=true
+                        break
+                    else
+                        log_warning "Extraction succeeded but expected directory not found"
+                        rm -f "$filename" 2>/dev/null
+                    fi
+                else
+                    log_warning "Failed to extract $filename"
+                    rm -f "$filename" 2>/dev/null
+                fi
+            else
+                log_warning "Failed to download from $url, trying next..."
+            fi
+        done
+        
+        if [ "$downloaded" = false ]; then
+            log_error "Failed to download kernel from any source."
+            log_error "Please check your internet connection and try again."
+            log_error "You can also manually download linux-$KERNEL_VERSION.tar.xz to $BUILD_DIR/kernel/"
+            error_exit "Kernel download failed"
+        fi
         
         log_success "Kernel downloaded and extracted"
     else
@@ -239,7 +310,7 @@ build_kernel() {
     log_info "Compiling kernel modules..."
     make -j"$JOBS" modules || error_exit "Module build failed"
     
-    # Install modules to temporary location
+    # Install modules to temporary location  
     local modules_dir="$BUILD_DIR/rootfs/lib/modules/$KERNEL_VERSION-lidis-security"
     mkdir -p "$modules_dir"
     make INSTALL_MOD_PATH="$BUILD_DIR/rootfs" modules_install
@@ -945,11 +1016,16 @@ case "${1:-build}" in
         echo "  LIDIS_CODENAME   Codename (default: SecurityCore)"
         echo "  BUILD_DIR        Build directory (default: /tmp/lidis-build)"
         echo "  OUTPUT_DIR       Output directory (default: /tmp/lidis-output)"
-        echo "  KERNEL_VERSION   Kernel version (default: 6.8.0)"
+        echo "  KERNEL_VERSION   Kernel version (default: 6.8)"
         echo "  ARCH             Architecture (auto-detected: $(uname -m))"
-        echo "  JOBS             Parallel jobs (default: nproc)"
+        echo "  JOBS             Parallel jobs (default: auto-detected)"
         echo "  KEEP_BUILD_DIR   Keep build directory (default: false)"
         echo "  NO_CLEANUP       Skip cleanup (default: false)"
+        echo ""
+        echo "Examples:"
+        echo "  KERNEL_VERSION=6.9 ./scripts/build_lidis.sh"
+        echo "  ARCH=arm64 KERNEL_VERSION=6.10 ./scripts/build_lidis.sh"
+        echo "  LIDIS_VERSION=2.0.0 ./scripts/build_lidis.sh"
         ;;
     *)
         log_error "Unknown command: $1"
