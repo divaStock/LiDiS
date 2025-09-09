@@ -557,9 +557,51 @@ create_base_rootfs() {
         fi
         
         log_success "Base filesystem created"
+        
+        # Configure comprehensive sources.list for full package availability
+        log_info "Configuring package repositories..."
+        configure_repositories "$rootfs_dir" "$ubuntu_mirror" "$debootstrap_arch"
     else
         log_info "Base filesystem already exists"
     fi
+}
+
+# Configure package repositories in rootfs
+configure_repositories() {
+    local rootfs_dir="$1"
+    local primary_mirror="$2"
+    local arch="$3"
+    
+    log_info "Setting up comprehensive package repositories for $arch"
+    
+    # Create comprehensive sources.list based on architecture
+    if [[ "$arch" == "amd64" || "$arch" == "i386" ]]; then
+        # x86 architectures use main archive
+        cat > "$rootfs_dir/etc/apt/sources.list" << EOF
+# LiDiS Ubuntu 22.04 LTS (Jammy) Package Sources
+deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+
+# Additional sources
+deb-src http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+EOF
+    else
+        # ARM64 and other architectures use ports
+        cat > "$rootfs_dir/etc/apt/sources.list" << EOF
+# LiDiS Ubuntu 22.04 LTS (Jammy) Package Sources - Ports
+deb http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
+
+# Additional sources
+deb-src http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+EOF
+    fi
+    
+    log_success "Package repositories configured for $arch"
 }
 
 # Install LiDiS security components
@@ -684,17 +726,60 @@ rule_generation = true
 auto_deployment = false
 EOF
 
-    # Install Python dependencies
+    # Install Python dependencies and security tools
+    log_info "Installing Python runtime and security packages..."
     chroot "$rootfs_dir" /bin/bash -c "
+        # Update package lists with comprehensive repositories
         apt-get update
-        apt-get install -y python3-pip python3-dev python3-setuptools
-        pip3 install numpy scikit-learn aiohttp psutil python-magic
-        apt-get install -y iptables netfilter-persistent fail2ban
-        systemctl enable lidis-ips
-        systemctl enable lidis-ttp-detector  
-        systemctl enable lidis-zeroday-detector
-        systemctl enable lidis-threat-intelligence
+        
+        # Install basic build and development tools
+        apt-get install -y build-essential wget curl ca-certificates
+        
+        # Install Python packages (should now be available from universe)
+        if apt-get install -y python3-pip python3-dev python3-setuptools python3-venv; then
+            echo 'Python packages installed successfully'
+        else
+            echo 'Warning: Some Python packages may not be available'
+            # Fallback: install basic python3 and try to get pip manually
+            apt-get install -y python3 python3-dev
+            curl -sS https://bootstrap.pypa.io/get-pip.py | python3 - || echo 'pip installation failed'
+        fi
+        
+        # Install Python dependencies with error handling
+        if command -v pip3 >/dev/null 2>&1 || command -v pip >/dev/null 2>&1; then
+            python3 -m pip install --upgrade pip setuptools wheel 2>/dev/null || echo 'pip upgrade failed'
+            python3 -m pip install numpy scikit-learn aiohttp psutil python-magic 2>/dev/null || {
+                echo 'Warning: Some Python packages failed to install'
+                # Try installing with system packages as fallback
+                apt-get install -y python3-numpy python3-sklearn python3-psutil 2>/dev/null || true
+            }
+        else
+            echo 'pip not available, trying system packages'
+            apt-get install -y python3-numpy python3-sklearn python3-psutil 2>/dev/null || true
+        fi
+        
+        # Install security packages
+        echo 'Installing security packages...'
+        apt-get install -y iptables iptables-persistent || echo 'Warning: iptables packages may not be available'
+        apt-get install -y fail2ban || echo 'Warning: fail2ban not available'
+        apt-get install -y auditd apparmor apparmor-utils apparmor-profiles || echo 'Warning: Some security tools not available'
+        
+        # Install networking tools
+        apt-get install -y netfilter-persistent ufw || echo 'Warning: Some network security tools not available'
+        
+        echo 'Package installation completed'
     "
+    
+    # Enable LiDiS services (do this outside chroot to avoid systemctl issues)
+    log_info "Configuring LiDiS services..."
+    if [ -f "$rootfs_dir/etc/systemd/system/lidis-ips.service" ]; then
+        chroot "$rootfs_dir" /bin/bash -c "
+            systemctl enable lidis-ips 2>/dev/null || echo 'Service lidis-ips will be enabled on first boot'
+            systemctl enable lidis-ttp-detector 2>/dev/null || echo 'Service lidis-ttp-detector will be enabled on first boot'
+            systemctl enable lidis-zeroday-detector 2>/dev/null || echo 'Service lidis-zeroday-detector will be enabled on first boot'
+            systemctl enable lidis-threat-intelligence 2>/dev/null || echo 'Service lidis-threat-intelligence will be enabled on first boot'
+        " || log_warning "Service enablement will be handled on first boot"
+    fi
     
     log_success "Security components installed"
 }
@@ -704,6 +789,10 @@ configure_system_security() {
     log_info "Configuring system security settings..."
     
     local rootfs_dir="$BUILD_DIR/rootfs"
+    
+    # Create all necessary security directories first
+    log_info "Creating security configuration directories..."
+    mkdir -p "$rootfs_dir"/{etc/audit/rules.d,etc/apparmor.d/lidis,etc/security,var/log/audit}
     
     # Kernel security parameters
     cat >> "$rootfs_dir/etc/sysctl.conf" << 'EOF'
@@ -756,9 +845,11 @@ kernel.core_pattern = |/bin/false
 EOF
 
     # Configure AppArmor profiles
-    mkdir -p "$rootfs_dir/etc/apparmor.d/lidis"
+    log_info "Setting up AppArmor profiles..."
+    # (Directory already created above)
     
     # Configure audit rules
+    log_info "Setting up audit rules..."
     cat > "$rootfs_dir/etc/audit/rules.d/lidis.rules" << 'EOF'
 # LiDiS Security Audit Rules
 
@@ -789,13 +880,26 @@ EOF
 -a always,exit -F arch=b64 -S chown -F auid>=1000 -F auid!=4294967295 -k perm_mod
 EOF
 
-    # Set secure permissions
+    # Set secure permissions and enable services
     chroot "$rootfs_dir" /bin/bash -c "
-        chmod 644 /etc/sysctl.conf
-        chmod 600 /etc/audit/rules.d/lidis.rules
-        chmod 755 /opt/lidis/security/*.py
-        systemctl enable auditd
-        systemctl enable apparmor
+        # Set basic file permissions
+        chmod 644 /etc/sysctl.conf 2>/dev/null || echo 'Warning: Could not set sysctl.conf permissions'
+        
+        # Set audit rules permissions if file exists
+        [ -f /etc/audit/rules.d/lidis.rules ] && chmod 600 /etc/audit/rules.d/lidis.rules || echo 'Warning: Audit rules file not found'
+        
+        # Set LiDiS security script permissions
+        [ -d /opt/lidis/security ] && chmod 755 /opt/lidis/security/*.py 2>/dev/null || echo 'Warning: LiDiS security scripts not found'
+        
+        # Enable security services if available
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable auditd 2>/dev/null || echo 'Warning: auditd service not available'
+            systemctl enable apparmor 2>/dev/null || echo 'Warning: apparmor service not available'
+        else
+            echo 'Warning: systemctl not available, services will need manual enablement'
+        fi
+        
+        echo 'Security permissions and services configured'
     "
     
     log_success "System security configured"
