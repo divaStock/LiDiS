@@ -471,9 +471,90 @@ create_base_rootfs() {
         esac
         
         log_info "Creating $debootstrap_arch base system..."
-        # Use debootstrap to create base system (Ubuntu 22.04 LTS)
-        debootstrap --arch="$debootstrap_arch" jammy "$rootfs_dir" http://archive.ubuntu.com/ubuntu/ || \
-            error_exit "Failed to create base filesystem"
+        
+        # Select appropriate mirror based on architecture
+        local ubuntu_mirror
+        case "$debootstrap_arch" in
+            "amd64"|"i386")
+                # x86 architectures use the main archive
+                ubuntu_mirror="http://archive.ubuntu.com/ubuntu/"
+                ;;
+            "arm64"|"armhf"|"ppc64el"|"s390x")
+                # Non-x86 architectures use the ports archive
+                ubuntu_mirror="http://ports.ubuntu.com/ubuntu-ports/"
+                ;;
+            *)
+                # Default to ports for unknown architectures
+                ubuntu_mirror="http://ports.ubuntu.com/ubuntu-ports/"
+                log_warning "Unknown architecture $debootstrap_arch, using ports mirror"
+                ;;
+        esac
+        
+        log_info "Using mirror: $ubuntu_mirror for $debootstrap_arch"
+        
+        # Check network connectivity before attempting download
+        log_info "Testing network connectivity..."
+        if ! curl --connect-timeout 10 --max-time 30 -s --head "$ubuntu_mirror" >/dev/null 2>&1 && \
+           ! wget --timeout=30 --connect-timeout=10 --spider "$ubuntu_mirror" >/dev/null 2>&1; then
+            log_warning "Cannot reach primary mirror, network connectivity may be limited"
+        fi
+        
+        # Use debootstrap to create base system (Ubuntu 22.04 LTS) with fallback
+        if ! debootstrap --arch="$debootstrap_arch" jammy "$rootfs_dir" "$ubuntu_mirror"; then
+            log_warning "Primary mirror failed, trying fallback mirrors..."
+            
+            # Try alternative mirrors
+            local fallback_mirrors=(
+                "http://mirror.ubuntu.com/ubuntu/"
+                "http://us.archive.ubuntu.com/ubuntu/"
+                "http://gb.archive.ubuntu.com/ubuntu/"
+            )
+            
+            # For non-x86, try ports mirrors
+            if [[ "$debootstrap_arch" != "amd64" && "$debootstrap_arch" != "i386" ]]; then
+                fallback_mirrors=(
+                    "http://mirror.ubuntu.com/ubuntu-ports/"
+                    "http://ports.ubuntu.com/ubuntu-ports/"
+                )
+            fi
+            
+            local success=false
+            for mirror in "${fallback_mirrors[@]}"; do
+                log_info "Trying fallback mirror: $mirror"
+                
+                # Test connectivity to fallback mirror first
+                if curl --connect-timeout 5 --max-time 15 -s --head "$mirror" >/dev/null 2>&1 || \
+                   wget --timeout=15 --connect-timeout=5 --spider "$mirror" >/dev/null 2>&1; then
+                    log_info "Mirror $mirror is reachable, attempting debootstrap..."
+                    
+                    if debootstrap --arch="$debootstrap_arch" jammy "$rootfs_dir" "$mirror"; then
+                        success=true
+                        break
+                    else
+                        log_warning "Debootstrap failed with mirror $mirror"
+                    fi
+                else
+                    log_warning "Mirror $mirror is not reachable, skipping..."
+                fi
+                
+                # Clean up partial download on failure
+                rm -rf "$rootfs_dir" 2>/dev/null || true
+            done
+            
+            if [ "$success" = false ]; then
+                log_error "Failed to create base filesystem with all available mirrors"
+                log_error "This could be due to:"
+                log_error "  - Network connectivity issues"
+                log_error "  - Mirror availability problems"
+                log_error "  - Architecture $debootstrap_arch not supported"
+                log_error ""
+                log_error "Troubleshooting steps:"
+                log_error "  1. Check internet connection"
+                log_error "  2. Try different architecture: ARCH=amd64 $0"
+                log_error "  3. Use different Ubuntu release (modify script)"
+                error_exit "Unable to download base filesystem"
+            fi
+        fi
         
         log_success "Base filesystem created"
     else
