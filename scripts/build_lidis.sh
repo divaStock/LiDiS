@@ -16,7 +16,64 @@ set -euo pipefail
 : "${OUTPUT_DIR:=/tmp/lidis-output}"
 : "${KERNEL_VERSION:=6.8.0}"
 : "${ARCH:=}"
-: "${JOBS:=$(nproc)}"
+: "${JOBS:=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+
+# Colors for output  
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging functions (must be defined before use)
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Error handling
+error_exit() {
+    log_error "$1"
+    exit 1
+}
+
+# Get CPU core count (cross-platform)
+get_cpu_count() {
+    local cpu_count
+    
+    # Try different methods to get CPU count
+    if command -v nproc >/dev/null 2>&1; then
+        cpu_count=$(nproc)
+    elif command -v sysctl >/dev/null 2>&1 && sysctl -n hw.ncpu >/dev/null 2>&1; then
+        cpu_count=$(sysctl -n hw.ncpu)
+    elif command -v getconf >/dev/null 2>&1; then
+        cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+    elif [ -r /proc/cpuinfo ]; then
+        cpu_count=$(grep -c ^processor /proc/cpuinfo)
+    else
+        cpu_count=4  # Safe fallback
+        log_warning "Could not detect CPU count, using fallback: $cpu_count"
+    fi
+    
+    # Ensure we have a valid number
+    if ! [[ "$cpu_count" =~ ^[0-9]+$ ]] || [ "$cpu_count" -lt 1 ]; then
+        cpu_count=4
+        log_warning "Invalid CPU count detected, using fallback: $cpu_count"
+    fi
+    
+    echo "$cpu_count"
+}
 
 # Build configuration (use pre-set defaults)
 # Variables are already initialized above to prevent unbound variable errors
@@ -50,35 +107,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIGS_DIR="$PROJECT_ROOT/configs"
 SRC_DIR="$PROJECT_ROOT/src"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Logging functions
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Error handling
-error_exit() {
-    log_error "$1"
-    exit 1
-}
+# Colors and logging functions already defined above
 
 # Check dependencies
 check_dependencies() {
