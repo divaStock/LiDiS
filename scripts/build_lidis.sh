@@ -15,7 +15,27 @@ LIDIS_CODENAME="${LIDIS_CODENAME:-SecurityCore}"
 BUILD_DIR="${BUILD_DIR:-/tmp/lidis-build}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/lidis-output}"
 KERNEL_VERSION="${KERNEL_VERSION:-6.8.0}"
-ARCH="${ARCH:-x86_64}"
+# Auto-detect architecture if not specified
+if [ -z "$ARCH" ]; then
+    DETECTED_ARCH=$(uname -m)
+    case "$DETECTED_ARCH" in
+        "x86_64"|"amd64")
+            ARCH="x86_64"
+            ;;
+        "aarch64"|"arm64")
+            ARCH="arm64"
+            ;;
+        "i686"|"i386")
+            ARCH="i386"
+            ;;
+        *)
+            ARCH="$DETECTED_ARCH"
+            ;;
+    esac
+    log_info "Auto-detected architecture: $ARCH"
+else
+    log_info "Using specified architecture: $ARCH"
+fi
 JOBS="${JOBS:-$(nproc)}"
 
 # Directories
@@ -56,15 +76,32 @@ error_exit() {
 
 # Check dependencies
 check_dependencies() {
-    log_info "Checking build dependencies..."
+    log_info "Checking build dependencies for $ARCH..."
     
+    # Common dependencies for all architectures
     local deps=(
         "gcc" "make" "git" "wget" "curl" "debootstrap" "squashfs-tools"
-        "genisoimage" "isolinux" "syslinux-utils" "grub-efi-amd64-bin"
-        "grub-pc-bin" "mtools" "dosfstools" "parted" "python3"
+        "genisoimage" "mtools" "dosfstools" "parted" "python3"
         "python3-pip" "flex" "bison" "libssl-dev" "libelf-dev"
         "bc" "kmod" "cpio" "rsync"
     )
+    
+    # Architecture-specific dependencies
+    case "$ARCH" in
+        "x86_64"|"amd64")
+            deps+=("isolinux" "syslinux-utils" "grub-efi-amd64-bin" "grub-pc-bin")
+            ;;
+        "arm64"|"aarch64")
+            deps+=("grub-efi-arm64" "grub-efi-arm64-bin")
+            ;;
+        "i386"|"x86")
+            deps+=("isolinux" "syslinux-utils" "grub-efi-ia32-bin" "grub-pc-bin")
+            ;;
+        *)
+            deps+=("grub-common")
+            log_warning "Using generic dependencies for architecture: $ARCH"
+            ;;
+    esac
     
     local missing_deps=()
     
@@ -172,8 +209,39 @@ build_kernel() {
     mkdir -p "$modules_dir"
     make INSTALL_MOD_PATH="$BUILD_DIR/rootfs" modules_install
     
-    # Copy kernel image
-    cp arch/x86/boot/bzImage "$BUILD_DIR/iso/vmlinuz"
+    # Copy kernel image (architecture-specific)
+    case "$ARCH" in
+        "x86_64"|"amd64"|"i386"|"x86")
+            if [ -f "arch/x86/boot/bzImage" ]; then
+                cp arch/x86/boot/bzImage "$BUILD_DIR/iso/vmlinuz"
+                log_info "Copied x86 kernel image (bzImage)"
+            else
+                log_error "x86 kernel image not found at arch/x86/boot/bzImage"
+                exit 1
+            fi
+            ;;
+        "arm64"|"aarch64")
+            if [ -f "arch/arm64/boot/Image" ]; then
+                cp arch/arm64/boot/Image "$BUILD_DIR/iso/vmlinuz"
+                log_info "Copied ARM64 kernel image (Image)"
+            elif [ -f "arch/arm64/boot/Image.gz" ]; then
+                cp arch/arm64/boot/Image.gz "$BUILD_DIR/iso/vmlinuz"
+                log_info "Copied ARM64 kernel image (Image.gz)"
+            else
+                log_error "ARM64 kernel image not found at arch/arm64/boot/"
+                exit 1
+            fi
+            ;;
+        *)
+            log_warning "Unknown architecture $ARCH, trying generic kernel image"
+            if [ -f "vmlinux" ]; then
+                cp vmlinux "$BUILD_DIR/iso/vmlinuz"
+            else
+                log_error "No suitable kernel image found for $ARCH"
+                exit 1
+            fi
+            ;;
+    esac
     
     log_success "Kernel build completed"
 }
@@ -185,8 +253,27 @@ create_base_rootfs() {
     local rootfs_dir="$BUILD_DIR/rootfs"
     
     if [ ! -d "$rootfs_dir/usr" ]; then
+        # Map our ARCH to debootstrap architecture names
+        local debootstrap_arch
+        case "$ARCH" in
+            "x86_64"|"amd64")
+                debootstrap_arch="amd64"
+                ;;
+            "arm64"|"aarch64")
+                debootstrap_arch="arm64"
+                ;;
+            "i386"|"x86")
+                debootstrap_arch="i386"
+                ;;
+            *)
+                debootstrap_arch="$ARCH"
+                log_warning "Using architecture $ARCH directly for debootstrap"
+                ;;
+        esac
+        
+        log_info "Creating $debootstrap_arch base system..."
         # Use debootstrap to create base system (Ubuntu 22.04 LTS)
-        debootstrap --arch=amd64 jammy "$rootfs_dir" http://archive.ubuntu.com/ubuntu/ || \
+        debootstrap --arch="$debootstrap_arch" jammy "$rootfs_dir" http://archive.ubuntu.com/ubuntu/ || \
             error_exit "Failed to create base filesystem"
         
         log_success "Base filesystem created"
@@ -493,9 +580,12 @@ menuentry "LiDiS Linux $LIDIS_VERSION (Debug Mode)" {
 }
 EOF
 
-    # Create isolinux configuration for BIOS boot
-    mkdir -p "$iso_dir/isolinux"
-    cat > "$iso_dir/isolinux/isolinux.cfg" << EOF
+    # Create architecture-specific bootloader configuration
+    case "$ARCH" in
+        "x86_64"|"amd64"|"i386"|"x86")
+            # Create isolinux configuration for BIOS boot (x86 only)
+            mkdir -p "$iso_dir/isolinux"
+            cat > "$iso_dir/isolinux/isolinux.cfg" << EOF
 DEFAULT lidis
 TIMEOUT 100
 PROMPT 0
@@ -513,10 +603,24 @@ LABEL debug
   APPEND initrd=/initrd.img boot=live security=lidis debug loglevel=7
 EOF
 
-    # Copy bootloader files
-    cp /usr/lib/ISOLINUX/isolinux.bin "$iso_dir/isolinux/" 2>/dev/null || \
-        cp /usr/lib/syslinux/modules/bios/isolinux.bin "$iso_dir/isolinux/"
-    cp /usr/lib/syslinux/modules/bios/ldlinux.c32 "$iso_dir/isolinux/" 2>/dev/null || true
+            # Copy bootloader files
+            if cp /usr/lib/ISOLINUX/isolinux.bin "$iso_dir/isolinux/" 2>/dev/null || \
+               cp /usr/lib/syslinux/modules/bios/isolinux.bin "$iso_dir/isolinux/" 2>/dev/null; then
+                log_info "Copied isolinux.bin for x86 BIOS boot"
+            else
+                log_warning "Could not find isolinux.bin - BIOS boot may not work"
+            fi
+            
+            cp /usr/lib/syslinux/modules/bios/ldlinux.c32 "$iso_dir/isolinux/" 2>/dev/null || \
+                log_info "ldlinux.c32 not found (may not be needed)"
+            ;;
+        "arm64"|"aarch64")
+            log_info "ARM64 uses EFI boot only - skipping isolinux/BIOS configuration"
+            ;;
+        *)
+            log_info "Unknown architecture $ARCH - skipping isolinux configuration"
+            ;;
+    esac
     
     log_success "Bootloader configuration created"
 }
@@ -528,9 +632,26 @@ create_filesystem_image() {
     local rootfs_dir="$BUILD_DIR/rootfs"
     local iso_dir="$BUILD_DIR/iso"
     
-    # Create SquashFS image
-    mksquashfs "$rootfs_dir" "$iso_dir/live/filesystem.squashfs" \
-        -comp xz -Xbcj x86 -b 1M -Xdict-size 1M || \
+    # Create SquashFS image with architecture-specific compression
+    local squashfs_opts="-comp xz -b 1M -Xdict-size 1M"
+    
+    # Add architecture-specific BCJ filter for better compression
+    case "$ARCH" in
+        "x86_64"|"amd64"|"i386"|"x86")
+            squashfs_opts="$squashfs_opts -Xbcj x86"
+            ;;
+        "arm64"|"aarch64")
+            # ARM BCJ filter for better ARM64 compression
+            squashfs_opts="$squashfs_opts -Xbcj arm"
+            ;;
+        *)
+            # No BCJ filter for other architectures
+            log_info "No BCJ filter available for $ARCH"
+            ;;
+    esac
+    
+    log_info "Creating SquashFS with options: $squashfs_opts"
+    mksquashfs "$rootfs_dir" "$iso_dir/live/filesystem.squashfs" $squashfs_opts || \
         error_exit "Failed to create SquashFS image"
     
     mkdir -p "$iso_dir/live"
@@ -545,15 +666,45 @@ create_iso() {
     local iso_dir="$BUILD_DIR/iso"
     local iso_file="$OUTPUT_DIR/lidis-$LIDIS_VERSION-$ARCH.iso"
     
-    # Create hybrid ISO with UEFI and BIOS support
-    grub-mkrescue -o "$iso_file" "$iso_dir" \
-        --modules="part_gpt part_msdos" \
-        --locales="" --fonts="" \
-        --compress=xz || \
-        error_exit "Failed to create ISO image"
+    # Create ISO with architecture-specific options
+    local grub_modules="part_gpt part_msdos"
+    local iso_options="--locales=\"\" --fonts=\"\" --compress=xz"
     
-    # Make it hybrid bootable
-    isohybrid "$iso_file" 2>/dev/null || log_warning "isohybrid not available"
+    case "$ARCH" in
+        "x86_64"|"amd64")
+            log_info "Creating hybrid ISO with UEFI and BIOS support for x86_64"
+            grub-mkrescue -o "$iso_file" "$iso_dir" \
+                --modules="$grub_modules" \
+                $iso_options || \
+                error_exit "Failed to create ISO image"
+            # Make it hybrid bootable for x86
+            isohybrid "$iso_file" 2>/dev/null || log_warning "isohybrid not available"
+            ;;
+        "arm64"|"aarch64")
+            log_info "Creating EFI-only ISO for ARM64"
+            grub-mkrescue -o "$iso_file" "$iso_dir" \
+                --modules="$grub_modules" \
+                $iso_options || \
+                error_exit "Failed to create ISO image"
+            # ARM64 doesn't need isohybrid (EFI only)
+            log_info "ARM64 ISO created (EFI boot only)"
+            ;;
+        "i386"|"x86")
+            log_info "Creating hybrid ISO with UEFI and BIOS support for i386"
+            grub-mkrescue -o "$iso_file" "$iso_dir" \
+                --modules="$grub_modules" \
+                $iso_options || \
+                error_exit "Failed to create ISO image"
+            isohybrid "$iso_file" 2>/dev/null || log_warning "isohybrid not available"
+            ;;
+        *)
+            log_info "Creating generic ISO for $ARCH"
+            grub-mkrescue -o "$iso_file" "$iso_dir" \
+                --modules="$grub_modules" \
+                $iso_options || \
+                error_exit "Failed to create ISO image"
+            ;;
+    esac
     
     # Calculate checksums
     cd "$OUTPUT_DIR"
@@ -577,7 +728,7 @@ Package: lidis-security
 Version: $LIDIS_VERSION
 Section: admin
 Priority: required
-Architecture: amd64
+Architecture: $(case "$ARCH" in "x86_64"|"amd64") echo "amd64" ;; "arm64"|"aarch64") echo "arm64" ;; "i386"|"x86") echo "i386" ;; *) echo "$ARCH" ;; esac)
 Maintainer: LiDiS Security Project <security@lidis.org>
 Description: LiDiS Advanced Security Framework
  Comprehensive security framework including IPS, TTP detection,
@@ -603,9 +754,17 @@ EOF
     cp "$rootfs_dir"/etc/systemd/system/lidis-*.service \
        "$packages_dir/lidis-security/usr/lib/systemd/system/"
     
-    # Build package
+    # Build package with correct architecture
+    local pkg_arch
+    case "$ARCH" in
+        "x86_64"|"amd64") pkg_arch="amd64" ;;
+        "arm64"|"aarch64") pkg_arch="arm64" ;;
+        "i386"|"x86") pkg_arch="i386" ;;
+        *) pkg_arch="$ARCH" ;;
+    esac
+    
     dpkg-deb --build "$packages_dir/lidis-security" \
-        "$OUTPUT_DIR/lidis-security_${LIDIS_VERSION}_amd64.deb"
+        "$OUTPUT_DIR/lidis-security_${LIDIS_VERSION}_${pkg_arch}.deb"
     
     log_success "Installation packages created"
 }
@@ -647,11 +806,11 @@ Security Components:
 
 Build Artifacts:
 - ISO Image: lidis-$LIDIS_VERSION-$ARCH.iso
-- Security Package: lidis-security_${LIDIS_VERSION}_amd64.deb
+- Security Package: lidis-security_${LIDIS_VERSION}_$(case "$ARCH" in "x86_64"|"amd64") echo "amd64" ;; "arm64"|"aarch64") echo "arm64" ;; "i386"|"x86") echo "i386" ;; *) echo "$ARCH" ;; esac).deb
 - SHA256 Checksums: Available for verification
 
 System Requirements:
-- Architecture: x86_64 (AMD64)
+- Architecture: $ARCH $(case "$ARCH" in "x86_64"|"amd64") echo "(AMD64)" ;; "arm64"|"aarch64") echo "(ARM64/AArch64)" ;; "i386"|"x86") echo "(i386)" ;; *) echo "" ;; esac)
 - RAM: 4GB minimum, 8GB recommended
 - Storage: 20GB minimum
 - UEFI firmware with Secure Boot support recommended
@@ -752,7 +911,7 @@ case "${1:-build}" in
         echo "  BUILD_DIR        Build directory (default: /tmp/lidis-build)"
         echo "  OUTPUT_DIR       Output directory (default: /tmp/lidis-output)"
         echo "  KERNEL_VERSION   Kernel version (default: 6.8.0)"
-        echo "  ARCH             Architecture (default: x86_64)"
+        echo "  ARCH             Architecture (auto-detected: $(uname -m))"
         echo "  JOBS             Parallel jobs (default: nproc)"
         echo "  KEEP_BUILD_DIR   Keep build directory (default: false)"
         echo "  NO_CLEANUP       Skip cleanup (default: false)"
