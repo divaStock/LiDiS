@@ -1016,6 +1016,17 @@ create_filesystem_image() {
     local rootfs_dir="$BUILD_DIR/rootfs"
     local iso_dir="$BUILD_DIR/iso"
     
+    # Validate source directory exists and has content
+    if [ ! -d "$rootfs_dir" ]; then
+        error_exit "Root filesystem directory not found: $rootfs_dir"
+    fi
+    
+    if [ ! -d "$rootfs_dir/usr" ] || [ ! -d "$rootfs_dir/bin" ]; then
+        error_exit "Root filesystem appears incomplete - missing essential directories"
+    fi
+    
+    log_info "Source rootfs validation passed"
+    
     # Create SquashFS image with architecture-specific compression
     local squashfs_opts="-comp xz -b 1M -Xdict-size 1M"
     
@@ -1034,13 +1045,26 @@ create_filesystem_image() {
             ;;
     esac
     
-    log_info "Creating SquashFS with options: $squashfs_opts"
-    mksquashfs "$rootfs_dir" "$iso_dir/live/filesystem.squashfs" $squashfs_opts || \
-        error_exit "Failed to create SquashFS image"
-    
+    # Create destination directory first
     mkdir -p "$iso_dir/live"
     
-    log_success "Filesystem image created"
+    log_info "Creating SquashFS with options: $squashfs_opts"
+    if ! mksquashfs "$rootfs_dir" "$iso_dir/live/filesystem.squashfs" $squashfs_opts; then
+        log_error "SquashFS creation failed. Possible causes:"
+        log_error "  - Insufficient disk space"
+        log_error "  - Permission issues with destination directory"
+        log_error "  - Invalid compression options for this architecture"
+        log_error "  - Source directory corruption"
+        error_exit "Failed to create SquashFS image"
+    fi
+    
+    # Validate the created SquashFS file
+    if [ ! -f "$iso_dir/live/filesystem.squashfs" ]; then
+        error_exit "SquashFS file was not created successfully"
+    fi
+    
+    local squashfs_size=$(du -h "$iso_dir/live/filesystem.squashfs" | cut -f1)
+    log_success "Filesystem image created successfully (size: $squashfs_size)"
 }
 
 # Create ISO image
