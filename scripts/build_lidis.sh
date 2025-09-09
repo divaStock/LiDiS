@@ -9,14 +9,20 @@
 
 set -euo pipefail
 
-# Build configuration
-LIDIS_VERSION="${LIDIS_VERSION:-1.0.0}"
-LIDIS_CODENAME="${LIDIS_CODENAME:-SecurityCore}"
-BUILD_DIR="${BUILD_DIR:-/tmp/lidis-build}"
-OUTPUT_DIR="${OUTPUT_DIR:-/tmp/lidis-output}"
-KERNEL_VERSION="${KERNEL_VERSION:-6.8.0}"
+# Ensure required variables are set to avoid unbound variable errors
+: "${LIDIS_VERSION:=1.0.0}"
+: "${LIDIS_CODENAME:=SecurityCore}"  
+: "${BUILD_DIR:=/tmp/lidis-build}"
+: "${OUTPUT_DIR:=/tmp/lidis-output}"
+: "${KERNEL_VERSION:=6.8.0}"
+: "${ARCH:=}"
+: "${JOBS:=$(nproc)}"
+
+# Build configuration (use pre-set defaults)
+# Variables are already initialized above to prevent unbound variable errors
+
 # Auto-detect architecture if not specified
-if [ -z "${ARCH:-}" ]; then
+if [ -z "$ARCH" ]; then
     DETECTED_ARCH=$(uname -m)
     case "$DETECTED_ARCH" in
         "x86_64"|"amd64")
@@ -36,7 +42,7 @@ if [ -z "${ARCH:-}" ]; then
 else
     log_info "Using specified architecture: $ARCH"
 fi
-JOBS="${JOBS:-$(nproc)}"
+# JOBS variable already set above
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
