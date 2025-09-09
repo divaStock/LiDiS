@@ -1074,43 +1074,71 @@ create_iso() {
     local iso_dir="$BUILD_DIR/iso"
     local iso_file="$OUTPUT_DIR/lidis-$LIDIS_VERSION-$ARCH.iso"
     
+    # Check if grub-mkrescue is available
+    if ! command -v grub-mkrescue >/dev/null 2>&1; then
+        error_exit "grub-mkrescue not found. Please install grub2 tools (grub-mkrescue)"
+    fi
+    
     # Create ISO with architecture-specific options
     local grub_modules="part_gpt part_msdos"
-    local iso_options="--locales=\"\" --fonts=\"\" --compress=xz"
+    
+    # Try grub-mkrescue with different option sets
+    create_iso_with_grub() {
+        local output_file="$1"
+        local source_dir="$2"
+        local arch_type="$3"
+        
+        # Option sets to try (in order of preference)
+        local option_sets=(
+            "--compress=xz --modules=$grub_modules"
+            "--modules=$grub_modules"
+            "--compress=xz"
+            ""
+        )
+        
+        for options in "${option_sets[@]}"; do
+            log_info "Trying grub-mkrescue with options: $options"
+            if eval "grub-mkrescue -o \"$output_file\" \"$source_dir\" $options"; then
+                log_success "ISO created successfully with options: $options"
+                return 0
+            else
+                log_warning "Failed with options: $options, trying next..."
+                rm -f "$output_file" 2>/dev/null  # Clean up partial file
+            fi
+        done
+        
+        return 1
+    }
     
     case "$ARCH" in
         "x86_64"|"amd64")
             log_info "Creating hybrid ISO with UEFI and BIOS support for x86_64"
-            grub-mkrescue -o "$iso_file" "$iso_dir" \
-                --modules="$grub_modules" \
-                $iso_options || \
-                error_exit "Failed to create ISO image"
+            if ! create_iso_with_grub "$iso_file" "$iso_dir" "x86_64"; then
+                error_exit "Failed to create ISO image for x86_64"
+            fi
             # Make it hybrid bootable for x86
             isohybrid "$iso_file" 2>/dev/null || log_warning "isohybrid not available"
             ;;
         "arm64"|"aarch64")
             log_info "Creating EFI-only ISO for ARM64"
-            grub-mkrescue -o "$iso_file" "$iso_dir" \
-                --modules="$grub_modules" \
-                $iso_options || \
-                error_exit "Failed to create ISO image"
+            if ! create_iso_with_grub "$iso_file" "$iso_dir" "arm64"; then
+                error_exit "Failed to create ISO image for ARM64"
+            fi
             # ARM64 doesn't need isohybrid (EFI only)
             log_info "ARM64 ISO created (EFI boot only)"
             ;;
         "i386"|"x86")
             log_info "Creating hybrid ISO with UEFI and BIOS support for i386"
-            grub-mkrescue -o "$iso_file" "$iso_dir" \
-                --modules="$grub_modules" \
-                $iso_options || \
-                error_exit "Failed to create ISO image"
+            if ! create_iso_with_grub "$iso_file" "$iso_dir" "i386"; then
+                error_exit "Failed to create ISO image for i386"
+            fi
             isohybrid "$iso_file" 2>/dev/null || log_warning "isohybrid not available"
             ;;
         *)
             log_info "Creating generic ISO for $ARCH"
-            grub-mkrescue -o "$iso_file" "$iso_dir" \
-                --modules="$grub_modules" \
-                $iso_options || \
-                error_exit "Failed to create ISO image"
+            if ! create_iso_with_grub "$iso_file" "$iso_dir" "$ARCH"; then
+                error_exit "Failed to create ISO image for $ARCH"
+            fi
             ;;
     esac
     
