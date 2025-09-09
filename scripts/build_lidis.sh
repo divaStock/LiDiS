@@ -16,7 +16,7 @@ BUILD_DIR="${BUILD_DIR:-/tmp/lidis-build}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/lidis-output}"
 KERNEL_VERSION="${KERNEL_VERSION:-6.8.0}"
 # Auto-detect architecture if not specified
-if [ -z "$ARCH" ]; then
+if [ -z "${ARCH:-}" ]; then
     DETECTED_ARCH=$(uname -m)
     case "$DETECTED_ARCH" in
         "x86_64"|"amd64")
