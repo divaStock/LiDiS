@@ -1086,10 +1086,61 @@ create_iso() {
     local iso_dir="$BUILD_DIR/iso"
     local iso_file="$OUTPUT_DIR/lidis-$LIDIS_VERSION-$ARCH.iso"
     
-    # Check if grub-mkrescue is available
+    # Check if grub-mkrescue is available, or if we have alternative tools
     if ! command -v grub-mkrescue >/dev/null 2>&1; then
-        error_exit "grub-mkrescue not found. Please install grub2 tools (grub-mkrescue)"
+        log_warning "grub-mkrescue not found - trying alternative ISO creation tools"
+        
+        # Check for alternative tools
+        if command -v xorriso >/dev/null 2>&1 || command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1; then
+            log_info "Alternative ISO tools found - will create basic ISO without GRUB bootloader"
+            # Skip grub-mkrescue and go directly to alternatives
+            if create_basic_iso "$iso_file" "$iso_dir"; then
+                log_success "ISO created using alternative tools"
+                return 0
+            else
+                error_exit "Failed to create ISO with alternative tools"
+            fi
+        else
+            error_exit "No ISO creation tools found. Please install grub2-utils, xorriso, or genisoimage"
+        fi
     fi
+    
+    # Create basic ISO using alternative tools (when grub-mkrescue unavailable)
+    create_basic_iso() {
+        local output_file="$1"
+        local source_dir="$2"
+        
+        log_info "Creating basic ISO without GRUB bootloader..."
+        
+        # Try xorriso first
+        if command -v xorriso >/dev/null 2>&1; then
+            log_info "Using xorriso for ISO creation..."
+            if xorriso -as mkisofs -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
+               -r -J -joliet-long "$source_dir" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        
+        # Try genisoimage
+        if command -v genisoimage >/dev/null 2>&1; then
+            log_info "Using genisoimage for ISO creation..."
+            if genisoimage -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
+               -r -J "$source_dir" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        
+        # Try mkisofs
+        if command -v mkisofs >/dev/null 2>&1; then
+            log_info "Using mkisofs for ISO creation..."
+            if mkisofs -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
+               -r -J "$source_dir" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        
+        return 1
+    }
     
     # Create ISO with architecture-specific options
     local grub_modules="part_gpt part_msdos"
@@ -1131,17 +1182,30 @@ create_iso() {
                 log_info "Trying grub-mkrescue with options: $options"
             fi
             
-            # Use timeout to prevent hanging (if available)
-            local cmd="grub-mkrescue -o \"$output_file\" \"$source_dir\" $options 2>/dev/null"
+            # Execute grub-mkrescue with timeout protection (if available)
             local success=false
             
-            if command -v timeout >/dev/null 2>&1; then
-                if timeout 300 eval "$cmd"; then
-                    success=true
+            if [ -z "$options" ]; then
+                # No options case
+                if command -v timeout >/dev/null 2>&1; then
+                    if timeout 300 grub-mkrescue -o "$output_file" "$source_dir" 2>/dev/null; then
+                        success=true
+                    fi
+                else
+                    if grub-mkrescue -o "$output_file" "$source_dir" 2>/dev/null; then
+                        success=true
+                    fi
                 fi
             else
-                if eval "$cmd"; then
-                    success=true
+                # With options case - need to handle options expansion properly
+                if command -v timeout >/dev/null 2>&1; then
+                    if timeout 300 sh -c "grub-mkrescue -o '$output_file' '$source_dir' $options" 2>/dev/null; then
+                        success=true
+                    fi
+                else
+                    if sh -c "grub-mkrescue -o '$output_file' '$source_dir' $options" 2>/dev/null; then
+                        success=true
+                    fi
                 fi
             fi
             
