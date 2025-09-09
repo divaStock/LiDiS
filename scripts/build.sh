@@ -125,6 +125,8 @@ check_dependencies() {
     # Optional dependencies (build will work without these)
     local optional_deps=(
         "pahole"
+        "xorriso"
+        "isohybrid"
     )
     
     # Architecture-specific dependencies
@@ -153,6 +155,16 @@ check_dependencies() {
             missing_deps+=("$dep")
         fi
     done
+    
+    # Special checks for tools within packages
+    if ! command -v mformat >/dev/null 2>&1; then
+        log_warning "mformat (from mtools) not found - required for EFI boot images"
+        missing_deps+=("mformat (install mtools package)")
+    fi
+    
+    if ! command -v grub-mkrescue >/dev/null 2>&1; then
+        missing_deps+=("grub-mkrescue (install grub2-utils or grub-common)")
+    fi
     
     # Check optional dependencies
     for dep in "${optional_deps[@]}"; do
@@ -1088,6 +1100,13 @@ create_iso() {
         local source_dir="$2"
         local arch_type="$3"
         
+        # Check if mformat is available
+        local has_mformat=true
+        if ! command -v mformat >/dev/null 2>&1; then
+            has_mformat=false
+            log_warning "mformat not available - EFI boot may not work properly"
+        fi
+        
         # Option sets to try (in order of preference)
         local option_sets=(
             "--compress=xz --modules=$grub_modules"
@@ -1096,9 +1115,37 @@ create_iso() {
             ""
         )
         
+        # If mformat is missing, try additional fallback options
+        if [ "$has_mformat" = false ]; then
+            option_sets+=(
+                "--format=raw"
+                "--format=raw --compress=xz"
+                "--format=raw --modules=$grub_modules"
+            )
+        fi
+        
         for options in "${option_sets[@]}"; do
-            log_info "Trying grub-mkrescue with options: $options"
-            if eval "grub-mkrescue -o \"$output_file\" \"$source_dir\" $options"; then
+            if [ -z "$options" ]; then
+                log_info "Trying grub-mkrescue with no options (minimal mode)"
+            else
+                log_info "Trying grub-mkrescue with options: $options"
+            fi
+            
+            # Use timeout to prevent hanging (if available)
+            local cmd="grub-mkrescue -o \"$output_file\" \"$source_dir\" $options 2>/dev/null"
+            local success=false
+            
+            if command -v timeout >/dev/null 2>&1; then
+                if timeout 300 eval "$cmd"; then
+                    success=true
+                fi
+            else
+                if eval "$cmd"; then
+                    success=true
+                fi
+            fi
+            
+            if [ "$success" = true ]; then
                 log_success "ISO created successfully with options: $options"
                 return 0
             else
@@ -1106,6 +1153,26 @@ create_iso() {
                 rm -f "$output_file" 2>/dev/null  # Clean up partial file
             fi
         done
+        
+        # Final attempt with alternative tools if available
+        log_warning "grub-mkrescue failed, attempting alternative ISO creation..."
+        if command -v xorriso >/dev/null 2>&1; then
+            log_info "Trying xorriso as alternative..."
+            if xorriso -as mkisofs -o "$output_file" -b isolinux/isolinux.bin -c isolinux/boot.cat \
+               -no-emul-boot -boot-load-size 4 -boot-info-table "$source_dir" 2>/dev/null; then
+                log_success "ISO created with xorriso alternative"
+                return 0
+            fi
+        fi
+        
+        if command -v genisoimage >/dev/null 2>&1; then
+            log_info "Trying genisoimage as alternative..."
+            if genisoimage -o "$output_file" -b isolinux/isolinux.bin -c isolinux/boot.cat \
+               -no-emul-boot -boot-load-size 4 -boot-info-table "$source_dir" 2>/dev/null; then
+                log_success "ISO created with genisoimage alternative"
+                return 0
+            fi
+        fi
         
         return 1
     }
