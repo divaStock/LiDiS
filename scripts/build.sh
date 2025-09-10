@@ -1592,11 +1592,28 @@ EOF
 cleanup() {
     log_info "Cleaning up build environment..."
     
+    # Clean build directory
     if [ "$KEEP_BUILD_DIR" != "true" ]; then
-        rm -rf "$BUILD_DIR"
-        log_info "Build directory cleaned"
+        if [ -d "$BUILD_DIR" ]; then
+            log_info "Removing build directory: $BUILD_DIR"
+            if rm -rf "$BUILD_DIR" 2>/dev/null; then
+                log_success "Build directory cleaned successfully"
+            else
+                log_warning "Failed to remove build directory: $BUILD_DIR"
+                log_warning "You may need to remove it manually with: sudo rm -rf $BUILD_DIR"
+            fi
+        else
+            log_info "Build directory not found (already cleaned): $BUILD_DIR"
+        fi
     else
         log_info "Build directory preserved: $BUILD_DIR"
+    fi
+    
+    # Clean any temporary files
+    log_info "Cleaning temporary files..."
+    local temp_files="/tmp/lidis-*" 
+    if ls $temp_files >/dev/null 2>&1; then
+        rm -f $temp_files 2>/dev/null || log_warning "Some temporary files could not be removed"
     fi
 }
 
@@ -1626,9 +1643,14 @@ main() {
     log_info "Output directory: $OUTPUT_DIR"
     log_info "ISO image: lidis-$LIDIS_VERSION-$ARCH.iso"
     
-    # Optional cleanup
+    # Post-build cleanup
     if [ "$NO_CLEANUP" != "true" ]; then
+        log_info "Performing post-build cleanup..."
         cleanup
+        log_success "Build cleanup completed"
+    else
+        log_info "Skipping cleanup (use --cleanup to enable or clean command to clean manually)"
+        log_info "Build files preserved in: $BUILD_DIR"
     fi
 }
 
@@ -1638,6 +1660,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-cleanup)
             NO_CLEANUP=true
+            shift
+            ;;
+        --cleanup)
+            NO_CLEANUP=false
             shift
             ;;
         --keep-build-dir)
@@ -1691,7 +1717,40 @@ case "$COMMAND" in
         ;;
     "clean")
         log_info "Cleaning build environment..."
-        rm -rf "$BUILD_DIR" "$OUTPUT_DIR"
+        
+        # Clean build directory
+        if [ -d "$BUILD_DIR" ]; then
+            log_info "Removing build directory: $BUILD_DIR"
+            if rm -rf "$BUILD_DIR" 2>/dev/null; then
+                log_success "Build directory cleaned successfully"
+            else
+                log_error "Failed to remove build directory: $BUILD_DIR"
+                log_error "You may need to run: sudo rm -rf $BUILD_DIR"
+            fi
+        else
+            log_info "Build directory not found: $BUILD_DIR"
+        fi
+        
+        # Clean output directory
+        if [ -d "$OUTPUT_DIR" ]; then
+            log_info "Removing output directory: $OUTPUT_DIR"
+            if rm -rf "$OUTPUT_DIR" 2>/dev/null; then
+                log_success "Output directory cleaned successfully"
+            else
+                log_error "Failed to remove output directory: $OUTPUT_DIR"
+                log_error "You may need to run: sudo rm -rf $OUTPUT_DIR"
+            fi
+        else
+            log_info "Output directory not found: $OUTPUT_DIR"
+        fi
+        
+        # Clean temporary files
+        log_info "Cleaning temporary files..."
+        temp_files="/tmp/lidis-*"
+        if ls $temp_files >/dev/null 2>&1; then
+            rm -f $temp_files 2>/dev/null || log_warning "Some temporary files could not be removed"
+        fi
+        
         log_success "Clean completed"
         ;;
     "help"|"--help"|"-h")
@@ -1706,6 +1765,7 @@ case "$COMMAND" in
         echo "  help         Show this help"
         echo ""
         echo "Options:"
+        echo "  --cleanup            Force cleanup after build (default)"
         echo "  --no-cleanup         Skip cleanup after build"
         echo "  --keep-build-dir     Keep build directory"
         echo "  --enable-btf         Enable BTF debug info"
@@ -1727,9 +1787,12 @@ case "$COMMAND" in
         echo "  NO_CLEANUP       Skip cleanup (default: false)"
         echo ""
         echo "Examples:"
-        echo "  $0 --no-cleanup build"
+        echo "  $0 build                                    # Build with default cleanup"
+        echo "  $0 --no-cleanup build                      # Build without cleanup"
+        echo "  $0 --cleanup --keep-build-dir build        # Build with cleanup but keep build dir"
         echo "  $0 --arch=x86_64 --kernel-version=6.9 build"
         echo "  $0 --version=2.0.0 --enable-btf build"
+        echo "  $0 clean                                    # Clean all build artifacts"
         echo "  KERNEL_VERSION=6.9 $0 build"
         ;;
     *)
