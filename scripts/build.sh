@@ -110,6 +110,131 @@ SRC_DIR="$PROJECT_ROOT/src"
 
 # Colors and logging functions already defined above
 
+# Dependency package mapping for different systems
+get_package_name() {
+    local dep="$1"
+    local distro
+    
+    # Detect distribution
+    if [ -f /etc/os-release ]; then
+        distro=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    else
+        distro="unknown"
+    fi
+    
+    case "$dep" in
+        "mtools")
+            echo "mtools"
+            ;;
+        "genisoimage")
+            case "$distro" in
+                "fedora"|"rhel"|"centos"|"rocky"|"alma")
+                    echo "genisoimage"
+                    ;;
+                *)
+                    echo "genisoimage"
+                    ;;
+            esac
+            ;;
+        "libssl-dev")
+            case "$distro" in
+                "fedora"|"rhel"|"centos"|"rocky"|"alma")
+                    echo "openssl-devel"
+                    ;;
+                *)
+                    echo "libssl-dev"
+                    ;;
+            esac
+            ;;
+        "debootstrap")
+            echo "debootstrap"
+            ;;
+        "bc")
+            echo "bc"
+            ;;
+        "isohybrid")
+            case "$distro" in
+                "fedora"|"rhel"|"centos"|"rocky"|"alma")
+                    echo "syslinux"
+                    ;;
+                *)
+                    echo "isolinux"
+                    ;;
+            esac
+            ;;
+        "grub2-common"|"grub-common")
+            case "$distro" in
+                "fedora"|"rhel"|"centos"|"rocky"|"alma")
+                    echo "grub2-tools"
+                    ;;
+                *)
+                    echo "grub2-common"
+                    ;;
+            esac
+            ;;
+        *)
+            echo "$dep"
+            ;;
+    esac
+}
+
+# Install missing dependencies
+install_dependencies() {
+    local missing_deps=("$@")
+    local install_cmd
+    
+    if [ ${#missing_deps[@]} -eq 0 ]; then
+        return 0
+    fi
+    
+    log_info "Attempting to install missing dependencies automatically..."
+    
+    # Detect package manager
+    if command -v apt-get >/dev/null 2>&1; then
+        install_cmd="apt-get install -y"
+        # Update package list first
+        log_info "Updating package list..."
+        if ! sudo apt-get update >/dev/null 2>&1; then
+            log_warning "Failed to update package list, continuing anyway"
+        fi
+    elif command -v yum >/dev/null 2>&1; then
+        install_cmd="yum install -y"
+    elif command -v dnf >/dev/null 2>&1; then
+        install_cmd="dnf install -y"
+    elif command -v pacman >/dev/null 2>&1; then
+        install_cmd="pacman -S --noconfirm"
+    else
+        log_warning "No supported package manager found (apt, yum, dnf, pacman)"
+        log_info "Please install dependencies manually: ${missing_deps[*]}"
+        return 1
+    fi
+    
+    # Convert dependencies to proper package names and skip complex ones
+    local packages=()
+    for dep in "${missing_deps[@]}"; do
+        # Skip complex dependency descriptions
+        if echo "$dep" | grep -q "("; then
+            log_info "Manual installation needed for: $dep"
+            continue
+        fi
+        packages+=($(get_package_name "$dep"))
+    done
+    
+    if [ ${#packages[@]} -gt 0 ]; then
+        log_info "Installing packages: ${packages[*]}"
+        if sudo $install_cmd "${packages[@]}" 2>/dev/null; then
+            log_success "Dependencies installed successfully"
+            return 0
+        else
+            log_warning "Automatic installation failed for some packages"
+            log_info "Please install manually: sudo $install_cmd ${packages[*]}"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
 # Check dependencies
 check_dependencies() {
     log_info "Checking build dependencies for $ARCH..."
@@ -174,10 +299,49 @@ check_dependencies() {
     done
     
     if [ ${#missing_deps[@]} -ne 0 ]; then
-        log_error "Missing required dependencies: ${missing_deps[*]}"
-        log_info "Please install missing dependencies and try again"
-        log_info "Example: sudo apt-get install ${missing_deps[*]}"
-        exit 1
+        log_warning "Missing required dependencies: ${missing_deps[*]}"
+        
+        # Try to install dependencies automatically (unless disabled)
+        if [ "$NO_AUTO_INSTALL" = "true" ]; then
+            log_info "Automatic installation disabled. Please install manually:"
+            log_info "Ubuntu/Debian: sudo apt-get install mtools genisoimage libssl-dev bc debootstrap isolinux grub2-common"
+            log_info "RHEL/Fedora: sudo dnf install mtools genisoimage openssl-devel bc debootstrap syslinux grub2-tools"
+            exit 1
+        elif install_dependencies "${missing_deps[@]}"; then
+            log_info "Re-checking dependencies after installation..."
+            
+            # Re-check critical dependencies
+            local still_missing=()
+            for dep in "${deps[@]}"; do
+                if ! command -v "$dep" >/dev/null 2>&1 && ! dpkg -l "$dep" >/dev/null 2>&1 2>/dev/null; then
+                    still_missing+=("$dep")
+                fi
+            done
+            
+            # Re-check special tools
+            if ! command -v mformat >/dev/null 2>&1; then
+                still_missing+=("mformat")
+            fi
+            if ! command -v grub-mkrescue >/dev/null 2>&1; then
+                still_missing+=("grub-mkrescue")
+            fi
+            
+            if [ ${#still_missing[@]} -ne 0 ]; then
+                log_error "Still missing dependencies after installation: ${still_missing[*]}"
+                log_error "Please install them manually and try again"
+                log_info "Ubuntu/Debian: sudo apt-get install mtools genisoimage libssl-dev bc debootstrap isolinux grub2-common"
+                log_info "RHEL/Fedora: sudo dnf install mtools genisoimage openssl-devel bc debootstrap syslinux grub2-tools"
+                exit 1
+            else
+                log_success "All dependencies resolved successfully!"
+            fi
+        else
+            log_error "Automatic dependency installation failed"
+            log_info "Please install missing dependencies manually:"
+            log_info "Ubuntu/Debian: sudo apt-get install ${missing_deps[*]}"
+            log_info "RHEL/Fedora: sudo dnf install $(for dep in "${missing_deps[@]}"; do echo -n "$(get_package_name "$dep") "; done)"
+            exit 1
+        fi
     fi
     
     if [ ${#missing_optional[@]} -ne 0 ]; then
@@ -1690,6 +1854,10 @@ while [ $# -gt 0 ]; do
             JOBS="${1#*=}"
             shift
             ;;
+        --no-auto-install)
+            NO_AUTO_INSTALL=true
+            shift
+            ;;
         build|kernel-only|clean|help|--help|-h)
             COMMAND="$1"
             shift
@@ -1773,6 +1941,7 @@ case "$COMMAND" in
         echo "  --kernel-version=VER Kernel version to build"
         echo "  --version=VER        LiDiS version string"
         echo "  --jobs=NUM           Number of parallel jobs"
+        echo "  --no-auto-install    Skip automatic dependency installation"
         echo ""
         echo "Environment Variables:"
         echo "  LIDIS_VERSION    Version string (default: 1.0.0)"
