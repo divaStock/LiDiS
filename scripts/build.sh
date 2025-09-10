@@ -928,17 +928,88 @@ create_initramfs() {
     
     # Create minimal initramfs structure
     cd "$initramfs_dir"
-    mkdir -p {bin,sbin,etc,proc,sys,dev,tmp,lib,lib64,usr/bin,usr/sbin}
+    mkdir -p {bin,sbin,etc,proc,sys,dev,tmp,lib,lib64,usr/bin,usr/sbin,mnt/live,mnt/squashfs,sysroot}
     
-    # Copy essential binaries
+    # Copy essential binaries for live boot
     cp /bin/sh bin/
     cp /bin/busybox bin/ 2>/dev/null || true
+    cp /bin/mount bin/ 2>/dev/null || cp /usr/bin/mount bin/ 2>/dev/null || true
+    cp /bin/umount bin/ 2>/dev/null || cp /usr/bin/umount bin/ 2>/dev/null || true
+    cp /bin/mkdir bin/ 2>/dev/null || cp /usr/bin/mkdir bin/ 2>/dev/null || true
+    cp /bin/ls bin/ 2>/dev/null || cp /usr/bin/ls bin/ 2>/dev/null || true
+    cp /sbin/modprobe sbin/ 2>/dev/null || cp /usr/sbin/modprobe sbin/ 2>/dev/null || true
+    cp /sbin/switch_root sbin/ 2>/dev/null || cp /usr/sbin/switch_root sbin/ 2>/dev/null || true
+    
+    # Copy SquashFS kernel module if available
+    local kernel_ver=$(uname -r)
+    if [ -f "/lib/modules/$kernel_ver/kernel/fs/squashfs/squashfs.ko" ]; then
+        mkdir -p "lib/modules/$kernel_ver/kernel/fs/squashfs"
+        cp "/lib/modules/$kernel_ver/kernel/fs/squashfs/squashfs.ko" "lib/modules/$kernel_ver/kernel/fs/squashfs/"
+    fi
     cp /sbin/init sbin/ 2>/dev/null || cp /usr/lib/systemd/systemd sbin/init
     
-    # Create init script
+    # Create init script for live system
     cat > init << 'EOF'
 #!/bin/sh
-exec /sbin/init
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# Load SquashFS module
+modprobe squashfs 2>/dev/null || echo "SquashFS module already loaded"
+
+# Find and mount the CD-ROM/ISO
+echo "Searching for LiDiS live media..."
+for device in /dev/sr0 /dev/cdrom /dev/hdc /dev/scd0; do
+    if [ -b "$device" ]; then
+        echo "Trying to mount $device..."
+        if mount -t iso9660 -o ro "$device" /mnt/live 2>/dev/null; then
+            echo "Mounted live media from $device"
+            break
+        fi
+    fi
+done
+
+# Check if we found the SquashFS filesystem
+if [ -f "/mnt/live/live/filesystem.squashfs" ]; then
+    echo "Found SquashFS filesystem, mounting..."
+    
+    # Mount the SquashFS filesystem
+    mount -t squashfs -o loop,ro /mnt/live/live/filesystem.squashfs /mnt/squashfs
+    
+    # Create a tmpfs for writable layer
+    mount -t tmpfs tmpfs /tmp
+    mkdir -p /tmp/rw /tmp/work
+    
+    # Use overlay filesystem for read-write capability
+    if mount -t overlay overlay -o lowerdir=/mnt/squashfs,upperdir=/tmp/rw,workdir=/tmp/work /sysroot 2>/dev/null; then
+        echo "Overlay filesystem mounted successfully"
+    else
+        # Fallback to read-only SquashFS mount
+        echo "Overlay not available, using read-only SquashFS"
+        mount --bind /mnt/squashfs /sysroot
+    fi
+    
+    # Prepare for switch_root
+    mkdir -p /sysroot/proc /sysroot/sys /sysroot/dev
+    mount --move /proc /sysroot/proc
+    mount --move /sys /sysroot/sys
+    mount --move /dev /sysroot/dev
+    
+    # Switch to the real root
+    echo "Switching to LiDiS root filesystem..."
+    exec switch_root /sysroot /sbin/init
+else
+    echo "ERROR: Could not find LiDiS filesystem!"
+    echo "Available files in /mnt/live:"
+    ls -la /mnt/live/ 2>/dev/null || echo "Mount failed"
+    
+    # Drop to emergency shell
+    echo "Dropping to emergency shell..."
+    exec /bin/sh
+fi
 EOF
     chmod +x init
     
@@ -1105,25 +1176,45 @@ create_iso() {
         fi
     fi
     
-    # Create basic ISO using alternative tools (when grub-mkrescue unavailable)
+    # Create bootable ISO using alternative tools (when grub-mkrescue unavailable)
     create_basic_iso() {
         local output_file="$1"
         local source_dir="$2"
         
-        log_info "Creating basic ISO without GRUB bootloader..."
+        log_info "Creating bootable ISO with alternative tools..."
         
-        # Try xorriso first
+        # Ensure we have isolinux boot configuration for VM compatibility
+        prepare_isolinux_boot "$source_dir"
+        
+        # Try xorriso with bootable configuration
         if command -v xorriso >/dev/null 2>&1; then
-            log_info "Using xorriso for ISO creation..."
+            log_info "Using xorriso for bootable ISO creation..."
+            if xorriso -as mkisofs -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
+               -c isolinux/boot.cat -b isolinux/isolinux.bin -no-emul-boot \
+               -boot-load-size 4 -boot-info-table -r -J "$source_dir" 2>/dev/null; then
+                log_success "Created bootable ISO with xorriso"
+                return 0
+            fi
+            
+            # Fallback to basic ISO without bootloader
+            log_warning "Bootable ISO failed, creating basic data ISO..."
             if xorriso -as mkisofs -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
                -r -J -joliet-long "$source_dir" 2>/dev/null; then
                 return 0
             fi
         fi
         
-        # Try genisoimage
+        # Try genisoimage with bootable configuration
         if command -v genisoimage >/dev/null 2>&1; then
-            log_info "Using genisoimage for ISO creation..."
+            log_info "Using genisoimage for bootable ISO creation..."
+            if genisoimage -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
+               -c isolinux/boot.cat -b isolinux/isolinux.bin -no-emul-boot \
+               -boot-load-size 4 -boot-info-table -r -J "$source_dir" 2>/dev/null; then
+                log_success "Created bootable ISO with genisoimage"
+                return 0
+            fi
+            
+            # Fallback to basic ISO
             if genisoimage -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
                -r -J "$source_dir" 2>/dev/null; then
                 return 0
@@ -1134,12 +1225,110 @@ create_iso() {
         if command -v mkisofs >/dev/null 2>&1; then
             log_info "Using mkisofs for ISO creation..."
             if mkisofs -o "$output_file" -V "LiDiS-$LIDIS_VERSION" \
-               -r -J "$source_dir" 2>/dev/null; then
+               -c isolinux/boot.cat -b isolinux/isolinux.bin -no-emul-boot \
+               -boot-load-size 4 -boot-info-table -r -J "$source_dir" 2>/dev/null; then
                 return 0
             fi
         fi
         
         return 1
+    }
+    
+    # Prepare isolinux boot configuration for VM compatibility
+    prepare_isolinux_boot() {
+        local iso_dir="$1"
+        
+        log_info "Setting up isolinux boot configuration for VM compatibility..."
+        
+        # Create isolinux directory and configuration
+        mkdir -p "$iso_dir/isolinux"
+        
+        # Create isolinux configuration that works with VMs
+        cat > "$iso_dir/isolinux/isolinux.cfg" << EOF
+DEFAULT lidis
+TIMEOUT 100
+PROMPT 0
+UI menu.c32
+
+MENU TITLE LiDiS Linux $LIDIS_VERSION Boot Menu
+MENU COLOR border 30;44 #40ffffff #a0000000
+MENU COLOR title 1;36;44 #9033ccff #a0000000
+MENU COLOR sel 7;37;40 #e0ffffff #20ffffff
+
+LABEL lidis
+  MENU LABEL LiDiS Linux $LIDIS_VERSION
+  KERNEL /vmlinuz
+  APPEND initrd=/initrd.img boot=live quiet splash
+
+LABEL recovery
+  MENU LABEL LiDiS Linux $LIDIS_VERSION (Recovery Mode)
+  KERNEL /vmlinuz  
+  APPEND initrd=/initrd.img boot=live single
+
+LABEL debug  
+  MENU LABEL LiDiS Linux $LIDIS_VERSION (Debug Mode)
+  KERNEL /vmlinuz
+  APPEND initrd=/initrd.img boot=live debug loglevel=7
+EOF
+
+        # Copy isolinux bootloader files if available
+        local isolinux_files=(
+            "/usr/lib/ISOLINUX/isolinux.bin"
+            "/usr/lib/syslinux/modules/bios/isolinux.bin"
+            "/usr/share/syslinux/isolinux.bin"
+        )
+        
+        local menu_files=(
+            "/usr/lib/syslinux/modules/bios/menu.c32"
+            "/usr/share/syslinux/menu.c32"
+            "/usr/lib/ISOLINUX/menu.c32"
+        )
+        
+        local copied_isolinux=false
+        for file in "${isolinux_files[@]}"; do
+            if [ -f "$file" ]; then
+                cp "$file" "$iso_dir/isolinux/isolinux.bin"
+                copied_isolinux=true
+                break
+            fi
+        done
+        
+        local copied_menu=false
+        for file in "${menu_files[@]}"; do
+            if [ -f "$file" ]; then
+                cp "$file" "$iso_dir/isolinux/menu.c32"
+                copied_menu=true
+                break
+            fi
+        done
+        
+        if [ "$copied_isolinux" = false ]; then
+            log_warning "isolinux.bin not found - bootable ISO may not work"
+        fi
+        
+        if [ "$copied_menu" = false ]; then
+            log_warning "menu.c32 not found - using simple boot menu"
+            # Create simpler config without menu.c32
+            cat > "$iso_dir/isolinux/isolinux.cfg" << EOF
+DEFAULT lidis
+TIMEOUT 100
+PROMPT 0
+
+LABEL lidis
+  KERNEL /vmlinuz
+  APPEND initrd=/initrd.img root=/dev/ram0 ramdisk_size=1048576 quiet splash
+
+LABEL recovery
+  KERNEL /vmlinuz  
+  APPEND initrd=/initrd.img root=/dev/ram0 ramdisk_size=1048576 single
+
+LABEL debug
+  KERNEL /vmlinuz
+  APPEND initrd=/initrd.img root=/dev/ram0 ramdisk_size=1048576 debug loglevel=7
+EOF
+        fi
+        
+        log_success "Isolinux boot configuration prepared"
     }
     
     # Create ISO with architecture-specific options
