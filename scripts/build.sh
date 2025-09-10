@@ -533,7 +533,22 @@ build_kernel() {
     log_info "Building LiDiS kernel..."
     
     local kernel_dir="$BUILD_DIR/kernel/linux-$KERNEL_VERSION"
+    
+    # Ensure kernel directory exists and is accessible
+    if [ ! -d "$kernel_dir" ]; then
+        log_error "Kernel directory not found: $kernel_dir"
+        log_error "Please run setup_build_environment and download_kernel first"
+        exit 1
+    fi
+    
+    # Change to kernel directory and ensure we have permissions
     cd "$kernel_dir"
+    
+    # Ensure we have write permissions in the kernel directory
+    if [ ! -w . ]; then
+        log_warning "Kernel directory not writable, attempting to fix permissions..."
+        sudo chown -R $(whoami):$(id -gn) . 2>/dev/null || true
+    fi
     
     # Use LiDiS kernel configuration
     log_info "Copying kernel configuration..."
@@ -569,28 +584,46 @@ build_kernel() {
             log_info "Disabling BTF debug info to ensure reliable builds"
         fi
         
-        # Comprehensively disable all BTF-related options (handle macOS vs Linux sed)
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS sed requires empty string after -i
-            sed -i '' 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' .config
-            sed -i '' 's/CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' .config
-            sed -i '' 's/CONFIG_PAHOLE_HAS_SPLIT_BTF=y/# CONFIG_PAHOLE_HAS_SPLIT_BTF is not set/' .config
-        else
-            # Linux sed
-            sed -i 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' .config
-            sed -i 's/CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' .config
-            sed -i 's/CONFIG_PAHOLE_HAS_SPLIT_BTF=y/# CONFIG_PAHOLE_HAS_SPLIT_BTF is not set/' .config
+        # Ensure we have write permissions on the config file
+        if [ ! -w .config ]; then
+            log_warning "Config file not writable, attempting to fix permissions..."
+            chmod u+w .config 2>/dev/null || sudo chmod u+w .config
         fi
         
-        # Ensure BTF is completely disabled
-        cat >> .config << 'EOF'
+        # Create a temporary config file to avoid sed permission issues
+        log_info "Modifying kernel configuration to disable BTF..."
+        cp .config .config.tmp
+        
+        # Comprehensively disable all BTF-related options
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS sed requires empty string after -i
+            sed -i '' 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' .config.tmp
+            sed -i '' 's/CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' .config.tmp
+            sed -i '' 's/CONFIG_PAHOLE_HAS_SPLIT_BTF=y/# CONFIG_PAHOLE_HAS_SPLIT_BTF is not set/' .config.tmp
+        else
+            # Linux sed
+            sed 's/CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' .config.tmp > .config.tmp.new && mv .config.tmp.new .config.tmp
+            sed 's/CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' .config.tmp > .config.tmp.new && mv .config.tmp.new .config.tmp
+            sed 's/CONFIG_PAHOLE_HAS_SPLIT_BTF=y/# CONFIG_PAHOLE_HAS_SPLIT_BTF is not set/' .config.tmp > .config.tmp.new && mv .config.tmp.new .config.tmp
+        fi
+        
+        # Append additional BTF disable options
+        cat >> .config.tmp << 'EOF'
+
 # LiDiS: Disable BTF to prevent build failures
 # CONFIG_DEBUG_INFO_BTF is not set
 # CONFIG_DEBUG_INFO_BTF_MODULES is not set  
 # CONFIG_PAHOLE_HAS_SPLIT_BTF is not set
 EOF
         
-        log_info "BTF debug info disabled for stable builds"
+        # Replace the original config file
+        if mv .config.tmp .config; then
+            log_success "BTF configuration disabled successfully"
+        else
+            log_error "Failed to update kernel configuration"
+            rm -f .config.tmp .config.tmp.new 2>/dev/null
+            exit 1
+        fi
     fi
     
     # Update configuration for current kernel version
