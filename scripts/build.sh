@@ -18,6 +18,9 @@ set -euo pipefail
 : "${ARCH:=}"
 : "${JOBS:=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 : "${ENABLE_BTF:=false}"
+: "${KEEP_BUILD_DIR:=false}"
+: "${NO_CLEANUP:=false}"
+: "${NO_AUTO_INSTALL:=false}"
 
 # Colors for output  
 RED='\033[0;31m'
@@ -157,8 +160,11 @@ get_package_name() {
                 "fedora"|"rhel"|"centos"|"rocky"|"alma")
                     echo "syslinux"
                     ;;
+                "ubuntu"|"debian")
+                    echo "syslinux-utils"
+                    ;;
                 *)
-                    echo "isolinux"
+                    echo "syslinux-utils"
                     ;;
             esac
             ;;
@@ -346,13 +352,42 @@ check_dependencies() {
     
     if [ ${#missing_optional[@]} -ne 0 ]; then
         log_warning "Missing optional dependencies: ${missing_optional[*]}"
-        log_info "Build will continue, but some features may be disabled"
-        log_info "To enable all features: sudo apt-get install ${missing_optional[*]}"
         
-        # Specific guidance for pahole
-        if [[ " ${missing_optional[*]} " =~ " pahole " ]]; then
-            log_info "Without pahole: BTF debug info will be disabled automatically"
-            log_info "Install pahole with: sudo apt-get install dwarves"
+        # Try to install critical optional dependencies like isohybrid
+        local critical_optional=()
+        for dep in "${missing_optional[@]}"; do
+            if [ "$dep" = "isohybrid" ]; then
+                critical_optional+=("$dep")
+            fi
+        done
+        
+        if [ ${#critical_optional[@]} -gt 0 ] && [ "$NO_AUTO_INSTALL" != "true" ]; then
+            log_info "Installing critical optional dependencies: ${critical_optional[*]}"
+            if install_dependencies "${critical_optional[@]}"; then
+                log_success "Critical optional dependencies installed"
+                # Remove installed deps from missing list
+                local still_missing=()
+                for dep in "${missing_optional[@]}"; do
+                    if ! [[ " ${critical_optional[*]} " =~ " ${dep} " ]]; then
+                        still_missing+=("$dep")
+                    fi
+                done
+                missing_optional=("${still_missing[@]}")
+            else
+                log_warning "Failed to install some critical optional dependencies"
+            fi
+        fi
+        
+        if [ ${#missing_optional[@]} -gt 0 ]; then
+            log_info "Remaining optional dependencies will be skipped: ${missing_optional[*]}"
+            log_info "Build will continue, but some features may be disabled"
+            log_info "To enable all features manually: sudo apt-get install ${missing_optional[*]}"
+            
+            # Specific guidance for pahole
+            if [[ " ${missing_optional[*]} " =~ " pahole " ]]; then
+                log_info "Without pahole: BTF debug info will be disabled automatically"
+                log_info "Install pahole with: sudo apt-get install dwarves"
+            fi
         fi
     fi
     
@@ -501,7 +536,24 @@ build_kernel() {
     cd "$kernel_dir"
     
     # Use LiDiS kernel configuration
-    cp "$CONFIGS_DIR/kernel_config" .config
+    log_info "Copying kernel configuration..."
+    if [ ! -f "$CONFIGS_DIR/kernel_config" ]; then
+        log_error "Kernel configuration not found: $CONFIGS_DIR/kernel_config"
+        exit 1
+    fi
+    
+    if ! cp "$CONFIGS_DIR/kernel_config" .config 2>/dev/null; then
+        log_warning "Permission denied copying kernel config, trying with sudo..."
+        if ! sudo cp "$CONFIGS_DIR/kernel_config" .config; then
+            log_error "Failed to copy kernel configuration"
+            log_error "Please check permissions on: $CONFIGS_DIR/kernel_config"
+            exit 1
+        fi
+        # Fix ownership after sudo copy
+        sudo chown $(whoami):$(id -gn) .config 2>/dev/null || true
+    fi
+    
+    log_success "Kernel configuration copied successfully"
     
     # Handle BTF configuration based on user preference and tool availability
     if [ "$ENABLE_BTF" = "true" ] && command -v pahole >/dev/null 2>&1; then
