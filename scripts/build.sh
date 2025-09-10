@@ -1632,8 +1632,52 @@ main() {
     fi
 }
 
-# Handle command line arguments
-case "${1:-build}" in
+# Parse command line arguments
+COMMAND="build"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-cleanup)
+            NO_CLEANUP=true
+            shift
+            ;;
+        --keep-build-dir)
+            KEEP_BUILD_DIR=true
+            shift
+            ;;
+        --enable-btf)
+            ENABLE_BTF=true
+            shift
+            ;;
+        --arch=*)
+            ARCH="${1#*=}"
+            shift
+            ;;
+        --kernel-version=*)
+            KERNEL_VERSION="${1#*=}"
+            shift
+            ;;
+        --version=*)
+            LIDIS_VERSION="${1#*=}"
+            shift
+            ;;
+        --jobs=*)
+            JOBS="${1#*=}"
+            shift
+            ;;
+        build|kernel-only|clean|help|--help|-h)
+            COMMAND="$1"
+            shift
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            echo "Use '$0 help' for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Handle commands
+case "$COMMAND" in
     "build")
         main
         ;;
@@ -1653,13 +1697,22 @@ case "${1:-build}" in
     "help"|"--help"|"-h")
         echo "LiDiS Build System"
         echo ""
-        echo "Usage: $0 [command]"
+        echo "Usage: $0 [options] [command]"
         echo ""
         echo "Commands:"
         echo "  build        Build complete LiDiS distribution (default)"
         echo "  kernel-only  Build only the kernel"
         echo "  clean        Clean build environment"
         echo "  help         Show this help"
+        echo ""
+        echo "Options:"
+        echo "  --no-cleanup         Skip cleanup after build"
+        echo "  --keep-build-dir     Keep build directory"
+        echo "  --enable-btf         Enable BTF debug info"
+        echo "  --arch=ARCH          Target architecture"
+        echo "  --kernel-version=VER Kernel version to build"
+        echo "  --version=VER        LiDiS version string"
+        echo "  --jobs=NUM           Number of parallel jobs"
         echo ""
         echo "Environment Variables:"
         echo "  LIDIS_VERSION    Version string (default: 1.0.0)"
@@ -1674,12 +1727,13 @@ case "${1:-build}" in
         echo "  NO_CLEANUP       Skip cleanup (default: false)"
         echo ""
         echo "Examples:"
-        echo "  KERNEL_VERSION=6.9 ./scripts/build_lidis.sh"
-        echo "  ARCH=arm64 KERNEL_VERSION=6.10 ./scripts/build_lidis.sh"
-        echo "  LIDIS_VERSION=2.0.0 ./scripts/build_lidis.sh"
+        echo "  $0 --no-cleanup build"
+        echo "  $0 --arch=x86_64 --kernel-version=6.9 build"
+        echo "  $0 --version=2.0.0 --enable-btf build"
+        echo "  KERNEL_VERSION=6.9 $0 build"
         ;;
     *)
-        log_error "Unknown command: $1"
+        log_error "Unknown command: $COMMAND"
         echo "Use '$0 help' for usage information"
         exit 1
         ;;
